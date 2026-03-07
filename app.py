@@ -14,7 +14,7 @@ from datetime import datetime
 # 1. SETUP
 # ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Cow Tag Scanner", layout="wide")
-st.title("🐄 Cow Ear Tag AI")
+st.title("🐄 Cow Ear Tag Detector")
 st.write("Detect ear tags and read ID numbers using YOLOv8 & EasyOCR. Upload a single image **or a ZIP** of images.")
 
 MISHAP_MAP = {
