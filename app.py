@@ -171,7 +171,7 @@ def process_image(img_name: str,
 # ─────────────────────────────────────────────────────────────
 uploaded_file = st.file_uploader(
     "Choose a cattle image or ZIP of images…",
-    type=["jpg", "jpeg", "png", "zip"],
+    type=["zip","jpg", "jpeg", "png"],
 )
 
 # ─────────────────────────────────────────────────────────────
@@ -267,4 +267,4 @@ else:
 # 7. FOOTER
 # ─────────────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("Built with Streamlit, YOLOv8, and EasyOCR. (No OpenCV version)")
+st.caption("Built with Streamlit, YOLOv8, and EasyOCR")
