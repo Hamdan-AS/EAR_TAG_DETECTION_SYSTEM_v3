@@ -170,9 +170,9 @@ def preprocess_grayscale(crop_pil: Image.Image) -> Image.Image:
 
     # ── Upscale ───────────────────────────────────────────────
     min_dim = min(w, h)
-    if   min_dim < 40:  scale = 4
-    elif min_dim < 80:  scale = 3
-    elif min_dim < 150: scale = 2
+    if   min_dim < 60:  scale = 6
+    elif min_dim < 120: scale = 4
+    elif min_dim < 200: scale = 2
     else:               scale = 1
     if scale > 1:
         gray = gray.resize((w * scale, h * scale), Image.BICUBIC)
@@ -355,7 +355,7 @@ with c2:
 with c3:
     ocr_conf_thresh = st.slider("Min OCR Confidence", 0.0, 1.0, 0.25, 0.05)
 with c4:
-    pad_px = st.number_input("BBox Padding (px)", 0, 40, 8)
+    pad_px = st.number_input("BBox Padding (px)", 0, 120, 40)
 
 model_path = "cow_eartag_yolov8n_100ep_clean_best.pt"
 st.divider()
