@@ -1,4 +1,3 @@
-Using this images how to get the best result using this code:
 """
 ================================================================
   🐄  COW EAR TAG — Detection + OCR  (NO OpenCV)
