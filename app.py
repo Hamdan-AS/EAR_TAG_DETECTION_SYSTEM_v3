@@ -1,3 +1,4 @@
+Using this images how to get the best result using this code:
 """
 ================================================================
   🐄  COW EAR TAG — Detection + OCR  (NO OpenCV)
@@ -173,7 +174,7 @@ def preprocess_grayscale(crop_pil: Image.Image) -> Image.Image:
     if   min_dim < 60:  scale = 6
     elif min_dim < 120: scale = 4
     elif min_dim < 200: scale = 2
-    else:               scale = 1
+else:               scale = 1
     if scale > 1:
         gray = gray.resize((w * scale, h * scale), Image.BICUBIC)
 
@@ -266,12 +267,20 @@ def ocr_crop(reader, crop_pil: Image.Image):
                 paragraph=False,
                 allowlist=DIGITS_ONLY,
                 decoder="beamsearch",
-                beamWidth=10,
+                beamWidth=30,
                 text_threshold=0.25,
                 low_text=0.20,
                 link_threshold=0.3,
                 width_ths=0.8,
+                mag_ratio=2
             )
+            results = reader.readtext(
+    img_arr,
+    allowlist=DIGITS_ONLY,
+    decoder="beamsearch",
+    beamWidth=30,
+    mag_ratio=2,
+)
         except Exception:
             continue
 
@@ -416,7 +425,8 @@ if uploaded:
                         crop_pil = crop_box(image_pil, x1, y1, x2, y2, pad=pad_px)
 
                         # OCR
-                        raw_text, ocr_confidence = ocr_crop(reader, crop_pil)
+                        w, h = crop_pil.size  center_crop = crop_pil.crop((     int(w*0.15),     int(h*0.15),     int(w*0.85),     int(h*0.85) ))  
+                        raw_text, ocr_confidence = ocr_crop(reader, center_crop)
 
                         if ocr_confidence < ocr_conf_thresh and raw_text != "UNREADABLE":
                             raw_text = "LOW CONFIDENCE"
