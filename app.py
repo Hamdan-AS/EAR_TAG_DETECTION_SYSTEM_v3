@@ -253,4 +253,3 @@ if uploaded_file:
 else:
 
     st.info("📤 Upload an image or ZIP file to start scanning.")
-```
