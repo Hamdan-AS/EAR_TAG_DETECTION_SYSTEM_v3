@@ -4,13 +4,19 @@ import easyocr
 import numpy as np
 from PIL import Image, ImageOps, ImageEnhance
 import re
+import zipfile
+import io
+import os
+import pandas as pd
+from datetime import datetime
 
-# 1. SETUP & MODELS
+# ─────────────────────────────────────────────────────────────
+# 1. SETUP
+# ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Cow Tag Scanner", layout="wide")
-st.title("🐄 Cattle Ear Tag Detector")
-st.write("A simple demo to detect tags and read ID numbers using YOLOv8 & EasyOCR.")
+st.title("🐄 Cow Ear Tag AI")
+st.write("Detect ear tags and read ID numbers using YOLOv8 & EasyOCR. Upload a single image **or a ZIP** of images.")
 
-# Dictionary to fix common OCR mishaps (like | being read as 1)
 MISHAP_MAP = {
     "|": "1", "I": "1", "l": "1", "[": "1", "]": "1", "(": "1", ")": "1",
     "O": "0", "o": "0", "S": "5", "s": "5", "B": "8", "G": "6"
@@ -18,88 +24,247 @@ MISHAP_MAP = {
 
 @st.cache_resource
 def load_models():
-    # Load YOLO (Detection) and EasyOCR (Reading)
-    model = YOLO("cow_eartag_yolov8n_100ep_clean_best.pt")
+    model  = YOLO("cow_eartag_yolov8n_100ep_clean_best.pt")
     reader = easyocr.Reader(['en'], gpu=False)
     return model, reader
 
 detector, ocr_reader = load_models()
 
+# ─────────────────────────────────────────────────────────────
 # 2. SIDEBAR SETTINGS
-st.sidebar.header("Settings")
+# ─────────────────────────────────────────────────────────────
+st.sidebar.header("⚙️ Settings")
 conf_level = st.sidebar.slider("Detection Confidence", 0.1, 1.0, 0.4)
-padding = st.sidebar.number_input("Crop Padding (px)", 0, 100, 20)
+padding    = st.sidebar.number_input("Crop Padding (px)", 0, 100, 20)
 
-# 3. UPLOAD IMAGE
-uploaded_file = st.file_uploader("Choose a cattle image...", type=["jpg", "jpeg", "png"])
+# ─────────────────────────────────────────────────────────────
+# 3. HELPERS
+# ─────────────────────────────────────────────────────────────
 
-if uploaded_file:
-    # Open image with PIL
-    img = Image.open(uploaded_file).convert("RGB")
-    
-    # RUN YOLO DETECTION
-    results = detector(img, conf=conf_level)[0]
-    
-    # Show the full image with boxes
-    # Note: .plot() returns a BGR numpy array, we flip it to RGB for Streamlit
-    annotated_img = results.plot()[:, :, ::-1]
-    st.image(annotated_img, caption="Detected Tags", use_container_width=True)
+def _bbox_height(bbox) -> float:
+    """Return pixel height of an EasyOCR bounding box [[x,y],...]."""
+    ys = [pt[1] for pt in bbox]
+    return max(ys) - min(ys)
 
-    # 4. PROCESS EACH DETECTION
-    boxes = results.boxes
-    if len(boxes) > 0:
-        st.subheader(f"Found {len(boxes)} tag(s):")
-        
-        # Create a row for each detected tag
-        for i, box in enumerate(boxes):
-            cols = st.columns([1, 2])
-            
-            # Get coordinates and crop
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            # Add padding manually
-            tag_crop = img.crop((x1-padding, y1-padding, x2+padding, y2+padding))
-            
-            # PRE-PROCESS FOR OCR (Make it easier for the AI)
-            # 1. Grayscale 2. Boost Contrast 3. Auto-level
-            clean_crop = ImageOps.grayscale(tag_crop)
-            clean_crop = ImageEnhance.Contrast(clean_crop).enhance(2.0)
-            clean_crop = ImageOps.autocontrast(clean_crop)
 
-            # RUN OCR
-            # Convert PIL to Numpy for EasyOCR
-            crop_np = np.array(clean_crop)
-            ocr_results = ocr_reader.readtext(crop_np)
-            
-            # Extract text and fix mishaps
-            raw_text = "".join([res[1] for res in ocr_results]).strip()
-            
-            # Apply our MISHAP_MAP fixes
-            final_id = ""
-            for char in raw_text:
-                if char.isdigit():
-                    final_id += char
-                elif char in MISHAP_MAP:
-                    final_id += MISHAP_MAP[char]
+def pick_dominant_number(ocr_results: list) -> tuple[str, str]:
+    """
+    Discard small handwritten annotations; keep only the tallest
+    (= largest printed) text regions, merged left-to-right.
+    Returns (raw_merged_text, digits_only).
+    """
+    if not ocr_results:
+        return "", ""
 
-            # 5. DISPLAY RESULTS
-            with cols[0]:
-                st.image(tag_crop, caption=f"Tag #{i+1}")
-            
-            with cols[1]:
-                if final_id:
-                    st.success(f"**Read ID: {final_id}**")
-                else:
-                    st.warning("Could not read numbers clearly.")
-                
-                # Show the raw OCR result for debugging
-                st.text(f"Raw OCR output: {raw_text}")
-            st.divider()
+    heights   = [_bbox_height(r[0]) for r in ocr_results]
+    max_h     = max(heights)
+    threshold = max_h * 0.60        # ignore anything < 60 % of tallest
+
+    dominant = [
+        r for r, h in zip(ocr_results, heights) if h >= threshold
+    ]
+    # sort left-to-right by x-centre of bbox
+    dominant.sort(key=lambda r: np.mean([pt[0] for pt in r[0]]))
+
+    raw_text = "".join(r[1] for r in dominant).strip()
+
+    # apply mishap fixes → digits only
+    final_id = ""
+    for ch in raw_text:
+        if ch.isdigit():
+            final_id += ch
+        elif ch in MISHAP_MAP:
+            final_id += MISHAP_MAP[ch]
+
+    return raw_text, final_id
+
+
+def preprocess_crop(crop_pil: Image.Image) -> Image.Image:
+    """Grayscale → contrast boost → auto-level."""
+    img = ImageOps.grayscale(crop_pil)
+    img = ImageEnhance.Contrast(img).enhance(2.0)
+    img = ImageOps.autocontrast(img)
+    return img
+
+
+def safe_crop(img: Image.Image, x1, y1, x2, y2, pad: int) -> Image.Image:
+    """Crop with padding, clamped to image bounds."""
+    w, h = img.size
+    return img.crop((
+        max(0, x1 - pad),
+        max(0, y1 - pad),
+        min(w, x2 + pad),
+        min(h, y2 + pad),
+    ))
+
+
+def load_images_from_upload(uploaded) -> list[tuple[str, Image.Image]]:
+    """
+    Accept a single image OR a ZIP file.
+    Returns list of (filename, PIL.Image).
+    """
+    images = []
+
+    if uploaded.name.lower().endswith(".zip"):
+        with zipfile.ZipFile(io.BytesIO(uploaded.read()), "r") as zf:
+            entries = sorted(zf.namelist())
+            for entry in entries:
+                # skip directories and hidden / macOS metadata files
+                if entry.endswith("/") or os.path.basename(entry).startswith("__"):
+                    continue
+                ext = os.path.splitext(entry)[1].lower()
+                if ext not in (".jpg", ".jpeg", ".png", ".bmp", ".webp"):
+                    continue
+                try:
+                    data = zf.read(entry)
+                    pil  = Image.open(io.BytesIO(data)).convert("RGB")
+                    images.append((os.path.basename(entry), pil))
+                except Exception:
+                    pass   # skip unreadable files silently
     else:
-        st.info("No tags detected in this image. Try lowering the confidence slider.")
+        pil = Image.open(uploaded).convert("RGB")
+        images.append((uploaded.name, pil))
+
+    return images
+
+
+def process_image(img_name: str,
+                  img: Image.Image,
+                  conf: float,
+                  pad: int) -> tuple[np.ndarray, list[dict]]:
+    """
+    Run YOLO + OCR on one PIL image.
+    Returns (annotated_rgb_array, list_of_result_dicts).
+    """
+    results   = detector(img, conf=conf)[0]
+    annotated = results.plot()[:, :, ::-1]   # BGR → RGB
+    boxes     = results.boxes
+    records   = []
+
+    for i, box in enumerate(boxes):
+        x1, y1, x2, y2    = map(int, box.xyxy[0])
+        det_conf           = float(box.conf[0])
+        tag_crop           = safe_crop(img, x1, y1, x2, y2, pad)
+        clean_crop         = preprocess_crop(tag_crop)
+        crop_np            = np.array(clean_crop)
+        ocr_out            = ocr_reader.readtext(crop_np)
+        raw_text, final_id = pick_dominant_number(ocr_out)
+
+        records.append({
+            "Image":          img_name,
+            "Tag_#":          i + 1,
+            "Tag_Number":     final_id  if final_id  else "UNREADABLE",
+            "Raw_OCR":        raw_text  if raw_text  else "",
+            "Detection_Conf": f"{det_conf:.2f}",
+            "BBox":           f"({x1},{y1})-({x2},{y2})",
+            "Timestamp":      datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            # keep PIL crops for display (not in final CSV)
+            "_tag_crop":      tag_crop,
+            "_clean_crop":    clean_crop,
+        })
+
+    return annotated, records
+
+
+# ─────────────────────────────────────────────────────────────
+# 4. FILE UPLOADER  (image OR zip)
+# ─────────────────────────────────────────────────────────────
+uploaded_file = st.file_uploader(
+    "Choose a cattle image or ZIP of images…",
+    type=["jpg", "jpeg", "png", "zip"],
+)
+
+# ─────────────────────────────────────────────────────────────
+# 5. MAIN PROCESSING LOOP
+# ─────────────────────────────────────────────────────────────
+if uploaded_file:
+
+    all_images = load_images_from_upload(uploaded_file)
+
+    if not all_images:
+        st.error("No valid images found in the uploaded file.")
+        st.stop()
+
+    st.info(f"Processing **{len(all_images)}** image(s) …")
+
+    all_records = []   # accumulate across all images for CSV
+
+    for img_name, img in all_images:
+
+        annotated, records = process_image(img_name, img, conf_level, padding)
+        all_records.extend(records)
+
+        with st.expander(f"📷  {img_name}  —  {len(records)} tag(s)", expanded=True):
+
+            st.image(annotated, caption="YOLO detections",
+                     use_container_width=True)
+
+            if not records:
+                st.info("No tags detected. Try lowering the confidence slider.")
+                continue
+
+            st.subheader(f"Found {len(records)} tag(s):")
+
+            for rec in records:
+                cols = st.columns([1, 2])
+
+                with cols[0]:
+                    st.image(rec["_tag_crop"],
+                             caption=f"Tag #{rec['Tag_#']} — raw crop")
+                    st.image(rec["_clean_crop"],
+                             caption="Preprocessed (grayscale)")
+
+                with cols[1]:
+                    num = rec["Tag_Number"]
+                    if num and num != "UNREADABLE":
+                        st.markdown(f"""
+                        <div style="background:#1e293b;color:#facc15;
+                                    font-size:2rem;font-weight:900;
+                                    letter-spacing:6px;text-align:center;
+                                    padding:12px;border-radius:8px;
+                                    font-family:monospace;">
+                            {num}
+                        </div>""", unsafe_allow_html=True)
+                    else:
+                        st.warning("Could not read numbers clearly.")
+
+                    st.text(f"Raw OCR : {rec['Raw_OCR']}")
+                    st.text(f"Det conf: {rec['Detection_Conf']}")
+
+                st.divider()
+
+    # ─────────────────────────────────────────────────────────
+    # 6. SUMMARY TABLE + CSV DOWNLOAD
+    # ─────────────────────────────────────────────────────────
+    if all_records:
+        st.divider()
+        st.subheader("📊 All Results")
+
+        # Drop internal PIL columns before showing / exporting
+        export_cols = ["Image","Tag_#","Tag_Number","Raw_OCR",
+                       "Detection_Conf","BBox","Timestamp"]
+        df = pd.DataFrame(all_records)[export_cols]
+        st.dataframe(df, use_container_width=True)
+
+        readable    = df[df["Tag_Number"].str.match(r"^\d+$", na=False)]
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total Tags",  len(df))
+        m2.metric("Readable",    len(readable))
+        m3.metric("Unreadable",  len(df) - len(readable))
+
+        st.download_button(
+            "⬇️  Download CSV",
+            df.to_csv(index=False),
+            file_name="ear_tag_results.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
 
 else:
-    st.info("Please upload an image to start the detection demo.")
+    st.info("Please upload an image (JPG/PNG) or a ZIP of images to begin.")
 
-# 6. FOOTER
+# ─────────────────────────────────────────────────────────────
+# 7. FOOTER
+# ─────────────────────────────────────────────────────────────
 st.markdown("---")
 st.caption("Built with Streamlit, YOLOv8, and EasyOCR. (No OpenCV version)")
