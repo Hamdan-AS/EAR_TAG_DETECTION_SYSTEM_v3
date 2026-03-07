@@ -7,7 +7,7 @@ import re
 
 # 1. SETUP & MODELS
 st.set_page_config(page_title="Cow Tag Scanner", layout="wide")
-st.title("🐄 Cow Ear Tag AI")
+st.title("🐄 Cow Ear Tag Detector")
 st.write("A simple demo to detect tags and read ID numbers using YOLOv8 & EasyOCR.")
 
 # Dictionary to fix common OCR mishaps (like | being read as 1)
