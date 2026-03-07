@@ -1,707 +1,516 @@
-# ============================================================
-# 🐄 Cattle Ear-Tag Detection System
-# Streamlit Cloud | EasyOCR + Tesseract | Multi-YOLO Support
-# ============================================================
+"""
+================================================================
+  🐄  COW EAR TAG — Detection + OCR  (NO OpenCV)
+================================================================
+  Stack : YOLOv8 | EasyOCR | PIL + NumPy image pipeline
+  Why   : cv2 has no Python 3.14 wheel on Streamlit Cloud.
+          This version uses only PIL + numpy — works on any
+          Python version with zero system-lib dependencies.
+  Run   : streamlit run app.py
+================================================================
+"""
 
-import os
-import re
-import cv2
-import json
-import zipfile
-import tempfile
-import numpy as np
 import streamlit as st
-import pytesseract
-from PIL import Image, ImageEnhance, ImageFilter
-from datetime import datetime
+import numpy as np
+from PIL import Image, ImageFilter, ImageOps, ImageEnhance
 from ultralytics import YOLO
+import zipfile, os, tempfile, re
 import easyocr
-import io
+import pandas as pd
+from datetime import datetime
 
-# ─────────────────────────────────────────────
-# Page Config
-# ─────────────────────────────────────────────
-st.set_page_config(
-    page_title="🐄 Cattle Ear-Tag AI",
-    page_icon="🐄",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# ─────────────────────────────────────────────
-# Custom CSS
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# PAGE CONFIG
+# ─────────────────────────────────────────────────────────────
+st.set_page_config(page_title="🐄 Cow Ear Tag AI", layout="wide")
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
-
-    html, body, [class*="css"] {
-        font-family: 'IBM Plex Sans', sans-serif;
-    }
-    .stApp {
-        background-color: #0f1117;
-        color: #e8e8e8;
-    }
-    .main-header {
-        background: linear-gradient(135deg, #1a472a 0%, #2d6a4f 50%, #1b4332 100%);
-        padding: 2rem 2.5rem;
-        border-radius: 12px;
-        margin-bottom: 1.5rem;
-        border: 1px solid #40916c;
-    }
-    .main-header h1 {
-        font-family: 'IBM Plex Mono', monospace;
-        color: #d8f3dc;
-        font-size: 2rem;
-        margin: 0;
-        letter-spacing: -0.5px;
-    }
-    .main-header p {
-        color: #95d5b2;
-        margin: 0.3rem 0 0 0;
-        font-size: 0.9rem;
-        font-weight: 300;
-    }
-    .tag-card {
-        background: #1e1e2e;
-        border: 1px solid #2d6a4f;
-        border-radius: 10px;
-        padding: 1rem;
-        margin-bottom: 0.8rem;
-    }
-    .ocr-result {
-        background: #0d1f1a;
-        border-left: 3px solid #52b788;
-        padding: 0.5rem 0.8rem;
-        border-radius: 0 6px 6px 0;
-        font-family: 'IBM Plex Mono', monospace;
-        font-size: 1.1rem;
-        color: #d8f3dc;
-        margin: 0.4rem 0;
-    }
-    .ocr-fail {
-        border-left-color: #e63946;
-        color: #ff8fa3;
-    }
-    .confidence-badge {
-        display: inline-block;
-        background: #1b4332;
-        color: #95d5b2;
-        padding: 2px 8px;
-        border-radius: 20px;
-        font-size: 0.75rem;
-        font-family: 'IBM Plex Mono', monospace;
-        border: 1px solid #40916c;
-    }
-    .metric-box {
-        background: #1a1a2e;
-        border: 1px solid #333;
-        border-radius: 8px;
-        padding: 1rem;
-        text-align: center;
-    }
-    .metric-box .metric-value {
-        font-size: 2rem;
-        font-weight: 600;
-        color: #52b788;
-        font-family: 'IBM Plex Mono', monospace;
-    }
-    .metric-box .metric-label {
-        font-size: 0.75rem;
-        color: #888;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-    }
-    div[data-testid="stExpander"] {
-        background: #16213e;
-        border: 1px solid #2d6a4f;
-        border-radius: 10px;
-    }
-    .stTextInput > div > div > input {
-        background: #0d1f1a;
-        border: 1px solid #40916c;
-        color: #d8f3dc;
-        font-family: 'IBM Plex Mono', monospace;
-    }
-    .stSlider > div > div > div {
-        color: #52b788;
-    }
-    .stDownloadButton > button {
-        background: #2d6a4f;
-        color: #d8f3dc;
-        border: 1px solid #52b788;
-        border-radius: 6px;
-        font-family: 'IBM Plex Mono', monospace;
-        width: 100%;
-    }
-    .stDownloadButton > button:hover {
-        background: #40916c;
-        border-color: #74c69d;
-    }
-    .stButton > button {
-        background: #1b4332;
-        color: #d8f3dc;
-        border: 1px solid #40916c;
-        border-radius: 6px;
-    }
-    section[data-testid="stSidebar"] {
-        background: #0d1f1a;
-        border-right: 1px solid #1b4332;
-    }
-    .ocr-engine-tag {
-        font-size: 0.65rem;
-        background: #2d3561;
-        color: #a8b4ff;
-        padding: 1px 5px;
-        border-radius: 3px;
-        font-family: 'IBM Plex Mono', monospace;
-        margin-left: 5px;
-    }
-    .stSelectbox > div > div {
-        background: #0d1f1a;
-        border-color: #2d6a4f;
-        color: #d8f3dc;
-    }
+.main { background-color: #f0f2f6; }
+.tag-box {
+    background: #1e293b; color: #facc15;
+    font-size: 2.4rem; font-weight: 900;
+    letter-spacing: 8px; text-align: center;
+    padding: 14px 28px; border-radius: 10px;
+    font-family: monospace; margin: 8px 0;
+}
 </style>
 """, unsafe_allow_html=True)
 
 
-# ─────────────────────────────────────────────
-# Header
-# ─────────────────────────────────────────────
-st.markdown("""
-<div class="main-header">
-    <h1>🐄 Cattle Ear-Tag Detection System</h1>
-    <p>YOLO Detection · EasyOCR + Tesseract · Multi-Model Support · Livestock ID Automation</p>
-</div>
-""", unsafe_allow_html=True)
+# ─────────────────────────────────────────────────────────────
+# IMAGE HELPERS  (PIL + numpy, zero cv2)
+# ─────────────────────────────────────────────────────────────
+
+def pil_from_bytes(data: bytes) -> Image.Image:
+    """Load PIL image from raw bytes."""
+    import io
+    return Image.open(io.BytesIO(data)).convert("RGB")
 
 
-# ─────────────────────────────────────────────
-# Helper: Find all .pt models in repo root
-# ─────────────────────────────────────────────
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-def find_yolo_models():
-    """Scan directory for .pt model files."""
-    models = []
-    for f in sorted(os.listdir(BASE_DIR)):
-        if f.endswith(".pt"):
-            models.append(f)
-    return models
+def pil_from_path(path: str) -> Image.Image:
+    return Image.open(path).convert("RGB")
 
 
-# ─────────────────────────────────────────────
-# Cached Loaders
-# ─────────────────────────────────────────────
-@st.cache_resource
-def load_yolo(model_name: str):
-    path = os.path.join(BASE_DIR, model_name)
-    return YOLO(path)
-
-@st.cache_resource
-def load_easyocr():
-    return easyocr.Reader(
-        ['en'],
-        gpu=False,
-        model_storage_directory="/tmp/easyocr",
-        download_enabled=True
-    )
+def np_to_pil(arr: np.ndarray) -> Image.Image:
+    """Convert HxWx3 uint8 RGB numpy array → PIL."""
+    return Image.fromarray(arr.astype(np.uint8))
 
 
-# ─────────────────────────────────────────────
-# OCR Preprocessing: Optimised for Numbers
-# ─────────────────────────────────────────────
-def preprocess_for_ocr(crop_bgr: np.ndarray) -> list:
+def pil_to_np(img: Image.Image) -> np.ndarray:
+    return np.array(img)
+
+
+def crop_box(img: Image.Image, x1, y1, x2, y2, pad=8) -> Image.Image:
+    """Crop with optional padding, clamped to image bounds."""
+    w, h = img.size
+    return img.crop((
+        max(0, x1 - pad),
+        max(0, y1 - pad),
+        min(w, x2 + pad),
+        min(h, y2 + pad),
+    ))
+
+
+# ─────────────────────────────────────────────────────────────
+# GRAYSCALE PREPROCESSING  (PIL-only, tuned for yellow ear tags)
+# ─────────────────────────────────────────────────────────────
+
+def otsu_threshold(gray_arr: np.ndarray) -> np.ndarray:
     """
-    Returns multiple preprocessed versions of the crop for best OCR coverage.
-    Tuned to maximise numeric digit accuracy.
+    Pure-numpy Otsu binarisation.
+    Returns a uint8 array where text pixels = 0, background = 255.
     """
-    variants = []
+    # Build 256-bin histogram
+    hist, _ = np.histogram(gray_arr.ravel(), bins=256, range=(0, 256))
+    total   = gray_arr.size
+    sum_all = np.dot(np.arange(256), hist)
 
-    # 1. Upscale aggressively – OCR engines love larger text
-    h, w = crop_bgr.shape[:2]
-    scale = max(1, int(300 / min(h, w)))
-    big = cv2.resize(crop_bgr, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+    best_thresh, best_var = 0, 0.0
+    w0 = sum_bg = 0
 
-    gray = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY)
+    for t in range(256):
+        w0     += hist[t]
+        w1      = total - w0
+        if w0 == 0 or w1 == 0:
+            continue
+        sum_bg += t * hist[t]
+        mu0     = sum_bg / w0
+        mu1     = (sum_all - sum_bg) / w1
+        var     = w0 * w1 * (mu0 - mu1) ** 2
+        if var > best_var:
+            best_var    = var
+            best_thresh = t
 
-    # 2. CLAHE for local contrast
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    clahe_img = clahe.apply(gray)
-
-    # 3. Adaptive threshold (good for tags with varied lighting)
-    adaptive = cv2.adaptiveThreshold(
-        clahe_img, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 11, 2
-    )
-
-    # 4. Otsu threshold (clean tags)
-    _, otsu = cv2.threshold(clahe_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # 5. Inverted otsu (white digits on dark tags)
-    otsu_inv = cv2.bitwise_not(otsu)
-
-    # 6. Sharpened original
-    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-    sharpened = cv2.filter2D(clahe_img, -1, kernel)
-
-    variants.extend([clahe_img, adaptive, otsu, otsu_inv, sharpened])
-    return variants
+    binary = np.where(gray_arr > best_thresh, 255, 0).astype(np.uint8)
+    return binary
 
 
-def clean_number_string(text: str) -> str:
+def clahe_numpy(gray_arr: np.ndarray,
+                clip_limit: float = 2.5,
+                tile: int = 8) -> np.ndarray:
     """
-    Post-process OCR text to extract clean alphanumeric ear-tag IDs.
-    Fixes common OCR confusions: O→0, I→1, l→1, S→5, B→8, Z→2.
+    Contrast-Limited Adaptive Histogram Equalisation (numpy).
+    Divides image into tiles, equalises each, bilinear-blends borders.
     """
-    if not text:
-        return ""
-    
-    # Common OCR letter→digit confusions in tag context
-    confusion_map = {
-        'O': '0', 'o': '0',
-        'I': '1', 'l': '1', '|': '1',
-        'S': '5', 's': '5',
-        'B': '8',
-        'Z': '2', 'z': '2',
-        'G': '6',
-        'q': '9', 'g': '9',
-        'D': '0',
-    }
-    
-    # Keep letters, digits, hyphens (tag IDs like UK123456 or 4E-1234)
-    cleaned = re.sub(r'[^A-Za-z0-9\-]', '', text)
-    
-    # Apply confusion correction only if string is mostly digits
-    digits = sum(c.isdigit() for c in cleaned)
-    letters = sum(c.isalpha() for c in cleaned)
-    
-    if digits > letters and letters > 0:
-        result = ""
-        for ch in cleaned:
-            result += confusion_map.get(ch, ch)
-        return result.upper()
-    
-    return cleaned.upper()
+    h, w   = gray_arr.shape
+    th, tw = max(1, h // tile), max(1, w // tile)
+    out    = np.zeros_like(gray_arr, dtype=np.float32)
+
+    for row in range(tile):
+        for col in range(tile):
+            r0, r1 = row * th, min((row + 1) * th, h)
+            c0, c1 = col * tw, min((col + 1) * tw, w)
+            patch  = gray_arr[r0:r1, c0:c1].ravel()
+
+            hist, _ = np.histogram(patch, bins=256, range=(0, 256))
+
+            # Clip & redistribute
+            excess  = np.maximum(hist - int(clip_limit * patch.size / 256), 0)
+            hist   -= excess
+            hist   += excess.sum() // 256
+
+            # CDF → LUT
+            cdf = hist.cumsum()
+            cdf_min = cdf[cdf > 0].min() if cdf[cdf > 0].size else 0
+            lut = np.round(
+                (cdf - cdf_min) / max(patch.size - cdf_min, 1) * 255
+            ).astype(np.uint8)
+
+            out[r0:r1, c0:c1] = lut[gray_arr[r0:r1, c0:c1]]
+
+    return np.clip(out, 0, 255).astype(np.uint8)
 
 
-# ─────────────────────────────────────────────
-# Dual OCR Engine
-# ─────────────────────────────────────────────
-def run_easyocr(reader, crop_bgr: np.ndarray) -> str:
-    """Run EasyOCR across multiple preprocessed variants, pick best result."""
-    variants = preprocess_for_ocr(crop_bgr)
-    candidates = []
-
-    for variant in variants:
-        try:
-            results = reader.readtext(variant, detail=1, paragraph=False,
-                                      allowlist='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-')
-            for (_, text, conf) in results:
-                cleaned = clean_number_string(text)
-                if cleaned and conf > 0.3:
-                    candidates.append((cleaned, conf))
-        except Exception:
-            pass
-
-    if not candidates:
-        # Try original without allowlist
-        try:
-            raw = reader.readtext(crop_bgr, detail=0)
-            text = " ".join(raw).strip()
-            cleaned = clean_number_string(text)
-            if cleaned:
-                candidates.append((cleaned, 0.2))
-        except Exception:
-            pass
-
-    if not candidates:
-        return ""
-
-    # Pick highest confidence
-    candidates.sort(key=lambda x: x[1], reverse=True)
-    return candidates[0][0]
+def morphological_close(binary: np.ndarray, ksize: int = 2) -> np.ndarray:
+    """
+    2-D morphological closing (dilation then erosion) via numpy.
+    Fills small gaps inside digit strokes.
+    """
+    from scipy.ndimage import binary_dilation, binary_erosion
+    fg     = binary == 0          # text is dark (0)
+    dilated = binary_dilation(fg, iterations=ksize)
+    closed  = binary_erosion(dilated, iterations=ksize)
+    return np.where(closed, 0, 255).astype(np.uint8)
 
 
-def run_tesseract(crop_bgr: np.ndarray) -> str:
-    """Run Tesseract across multiple preprocessed variants."""
-    variants = preprocess_for_ocr(crop_bgr)
-    candidates = []
+def preprocess_grayscale(crop_pil: Image.Image) -> Image.Image:
+    """
+    Full PIL+numpy grayscale pipeline for livestock ear-tag numerals.
 
-    # Tesseract configs tuned for tags:
-    configs = [
-        '--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-',  # single line
-        '--oem 3 --psm 8 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-',  # single word
-        '--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-',  # uniform block
-        '--oem 3 --psm 11',  # sparse text
+    1. Convert to grayscale (L)
+    2. Upscale small crops  (EasyOCR needs ≥ 32 px tall)
+    3. CLAHE contrast normalisation
+    4. Gentle sharpening
+    5. Otsu binarisation    (yellow-tag friendly threshold)
+    6. Morphological close  (fill tiny digit gaps)
+    Returns a grayscale PIL image.
+    """
+    gray = crop_pil.convert("L")
+    w, h = gray.size
+
+    # ── Upscale ───────────────────────────────────────────────
+    min_dim = min(w, h)
+    if   min_dim < 40:  scale = 4
+    elif min_dim < 80:  scale = 3
+    elif min_dim < 150: scale = 2
+    else:               scale = 1
+    if scale > 1:
+        gray = gray.resize((w * scale, h * scale), Image.BICUBIC)
+
+    # ── CLAHE ─────────────────────────────────────────────────
+    arr  = np.array(gray)
+    arr  = clahe_numpy(arr, clip_limit=2.5, tile=8)
+
+    # ── Sharpen ───────────────────────────────────────────────
+    pil  = Image.fromarray(arr)
+    pil  = pil.filter(ImageFilter.UnsharpMask(radius=1, percent=120, threshold=3))
+    arr  = np.array(pil)
+
+    # ── Otsu binarise ─────────────────────────────────────────
+    binary = otsu_threshold(arr)
+
+    # ── Morphological close ───────────────────────────────────
+    try:
+        binary = morphological_close(binary, ksize=2)
+    except ImportError:
+        pass   # scipy not available — skip closing, still works
+
+    return Image.fromarray(binary)
+
+
+# ─────────────────────────────────────────────────────────────
+# DOMINANT-NUMBER PICKER  (ignores small handwritten annotations)
+# ─────────────────────────────────────────────────────────────
+DIGITS_ONLY = "0123456789"
+
+
+def _bbox_height(bbox) -> float:
+    ys = [pt[1] for pt in bbox]
+    return max(ys) - min(ys)
+
+
+def _pick_dominant_number(results: list):
+    """
+    Ear tags have one large printed ID + small handwritten notes.
+    Keep only detections whose bounding-box height >= 60 % of the
+    tallest detection → discards the small annotations automatically.
+    Merge survivors left-to-right → final tag number.
+    """
+    valid = []
+    for (bbox, text, conf) in results:
+        clean = re.sub(r"\D", "", text)
+        if clean and float(conf) > 0.20:
+            valid.append((bbox, clean, float(conf)))
+
+    if not valid:
+        return "", 0.0
+
+    heights    = [_bbox_height(b) for b, _, _ in valid]
+    max_h      = max(heights)
+    threshold  = max_h * 0.60
+
+    dominant = [
+        (bbox, text, conf)
+        for (bbox, text, conf), h in zip(valid, heights)
+        if h >= threshold
+    ]
+    dominant.sort(key=lambda x: np.mean([pt[0] for pt in x[0]]))
+
+    merged   = "".join(t for _, t, _ in dominant)
+    avg_conf = float(np.mean([c for _, _, c in dominant]))
+    return merged, round(avg_conf, 4)
+
+
+def ocr_crop(reader, crop_pil: Image.Image):
+    """
+    Multi-pass EasyOCR on a PIL crop.
+    Tries preprocessed, inverted, and raw variants.
+    Returns (best_digits_string, confidence).
+    """
+    processed = preprocess_grayscale(crop_pil)
+    inverted  = ImageOps.invert(processed)
+
+    candidates = [
+        np.array(processed),   # grayscale binary
+        np.array(inverted),    # inverted  binary
+        np.array(crop_pil),    # raw RGB fallback
     ]
 
-    for variant in variants:
-        pil_img = Image.fromarray(variant)
-        for cfg in configs:
-            try:
-                text = pytesseract.image_to_string(pil_img, config=cfg).strip()
-                cleaned = clean_number_string(text)
-                if cleaned and len(cleaned) >= 2:
-                    # Get confidence data
-                    data = pytesseract.image_to_data(pil_img, config=cfg, output_type=pytesseract.Output.DICT)
-                    confs = [int(c) for c in data['conf'] if str(c).isdigit() and int(c) >= 0]
-                    avg_conf = sum(confs) / len(confs) if confs else 0
-                    candidates.append((cleaned, avg_conf))
-            except Exception:
-                pass
+    best_text, best_conf = "", 0.0
 
-    if not candidates:
-        return ""
+    for img_arr in candidates:
+        try:
+            results = reader.readtext(
+                img_arr,
+                detail=1,
+                paragraph=False,
+                allowlist=DIGITS_ONLY,
+                decoder="beamsearch",
+                beamWidth=10,
+                text_threshold=0.25,
+                low_text=0.20,
+                link_threshold=0.3,
+                width_ths=0.8,
+            )
+        except Exception:
+            continue
 
-    candidates.sort(key=lambda x: x[1], reverse=True)
-    return candidates[0][0]
+        if not results:
+            continue
 
+        text, conf = _pick_dominant_number(results)
+        if not text:
+            continue
 
-def dual_ocr(easyocr_reader, crop_bgr: np.ndarray, ocr_mode: str) -> tuple[str, str]:
-    """
-    Returns (final_text, engine_used).
-    Runs both engines and picks the most credible result.
-    """
-    easy_result = ""
-    tess_result = ""
-    engine_used = ""
+        if len(text) > len(best_text) or (
+                len(text) == len(best_text) and conf > best_conf):
+            best_text = text
+            best_conf = conf
 
-    if ocr_mode in ("EasyOCR Only", "Both (Best Result)"):
-        easy_result = run_easyocr(easyocr_reader, crop_bgr)
-
-    if ocr_mode in ("Tesseract Only", "Both (Best Result)"):
-        tess_result = run_tesseract(crop_bgr)
-
-    if ocr_mode == "EasyOCR Only":
-        return easy_result, "EasyOCR"
-    elif ocr_mode == "Tesseract Only":
-        return tess_result, "Tesseract"
-    else:
-        # Both: prefer longer credible result, with tie-break logic
-        def score(text):
-            if not text:
-                return -1
-            digits = sum(c.isdigit() for c in text)
-            return len(text) + digits  # reward more digit content
-
-        if score(easy_result) >= score(tess_result) and easy_result:
-            return easy_result, "EasyOCR"
-        elif tess_result:
-            return tess_result, "Tesseract"
-        elif easy_result:
-            return easy_result, "EasyOCR"
-        return "", "—"
+    return best_text or "UNREADABLE", round(best_conf, 4)
 
 
-# ─────────────────────────────────────────────
-# Sidebar Controls
-# ─────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("## ⚙️ Configuration")
-    st.divider()
-
-    # Model Selection
-    st.markdown("### 🤖 YOLO Model")
-    available_models = find_yolo_models()
-
-    if not available_models:
-        st.error("No `.pt` models found in repo root.\nAdd your YOLO `.pt` files and redeploy.")
-        st.stop()
-
-    selected_model = st.selectbox(
-        "Select Model",
-        options=available_models,
-        help="All .pt files in the repo root appear here automatically."
-    )
-
-    st.divider()
-
-    # Detection Settings
-    st.markdown("### 🎯 Detection")
-    conf_threshold = st.slider("Confidence Threshold", 0.1, 1.0, 0.4, 0.05)
-    iou_threshold = st.slider("IoU Threshold (NMS)", 0.1, 1.0, 0.45, 0.05)
-
-    st.divider()
-
-    # OCR Settings
-    st.markdown("### 🔠 OCR Engine")
-    ocr_mode = st.selectbox(
-        "OCR Mode",
-        ["Both (Best Result)", "EasyOCR Only", "Tesseract Only"],
-        help=(
-            "Both: runs EasyOCR + Tesseract and picks the best.\n"
-            "Recommended for maximum accuracy on livestock tags."
-        )
-    )
-
-    st.divider()
-
-    # Info box
-    st.markdown("""
-    <div style='background:#0d1f1a; border:1px solid #2d6a4f; border-radius:8px; padding:1rem; font-size:0.78rem; color:#95d5b2;'>
-    <b>💡 Tips for Best Results</b><br><br>
-    • Use <b>Both</b> OCR mode for highest accuracy<br>
-    • Lower confidence to catch faint tags<br>
-    • EasyOCR is better for angled/blurry tags<br>
-    • Tesseract excels on clean, upright text<br>
-    • Correct any wrong IDs before downloading
-    </div>
-    """, unsafe_allow_html=True)
+# ─────────────────────────────────────────────────────────────
+# DIGIT VALIDATION
+# ─────────────────────────────────────────────────────────────
+DIGIT_FIXES = {
+    "l":"1","I":"1","i":"1",
+    "O":"0","o":"0","Q":"0",
+    "S":"5","s":"5",
+    "B":"8","b":"6",
+    "Z":"2","z":"2",
+    "G":"6","g":"9",
+    "T":"7",
+}
 
 
-# ─────────────────────────────────────────────
-# File Upload
-# ─────────────────────────────────────────────
-st.markdown("### 📂 Upload Images")
-uploaded = st.file_uploader(
-    "Drop a ZIP archive or individual image(s)",
-    type=["zip", "jpg", "jpeg", "png"],
-    accept_multiple_files=False,
-    help="ZIP: multiple images in one archive. Single: one image at a time."
-)
+def validate_number(text: str):
+    if not text or text in ("UNREADABLE", "LOW CONFIDENCE"):
+        return text, "UNREADABLE", 0.0
 
+    corrected, fixes = "", 0
+    for ch in text.upper():
+        if ch.isdigit():
+            corrected += ch
+        elif ch in DIGIT_FIXES:
+            corrected += DIGIT_FIXES[ch]
+            fixes += 1
+
+    if not corrected:
+        return text, "UNREADABLE", 0.0
+
+    conf   = max(0.60, 0.97 - fixes * 0.05)
+    status = "VERIFIED" if fixes == 0 else f"AUTO-CORRECTED ({fixes} fix{'es' if fixes>1 else ''})"
+    return corrected, status, round(conf, 2)
+
+
+# ─────────────────────────────────────────────────────────────
+# MODEL LOADING
+# ─────────────────────────────────────────────────────────────
+@st.cache_resource
+def load_yolo(model_path: str):
+    return YOLO(model_path)
+
+
+@st.cache_resource
+def load_ocr_reader():
+    return easyocr.Reader(["en"], gpu=False, verbose=False)
+
+
+# ─────────────────────────────────────────────────────────────
+# UI
+# ─────────────────────────────────────────────────────────────
+st.title("🐄 Cattle Ear Tag Detection & OCR")
+st.caption("Upload livestock images — YOLO detects tags, EasyOCR reads the number.")
+
+if "results" not in st.session_state:
+    st.session_state.results = []
+
+c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
+with c1:
+    uploaded = st.file_uploader("Upload ZIP or Image",
+                                type=["zip","jpg","jpeg","png"])
+with c2:
+    det_conf = st.slider("Detection Confidence", 0.10, 1.0, 0.40, 0.05)
+with c3:
+    ocr_conf_thresh = st.slider("Min OCR Confidence", 0.0, 1.0, 0.25, 0.05)
+with c4:
+    pad_px = st.number_input("BBox Padding (px)", 0, 40, 8)
+
+model_path = "cow_eartag_yolov8n_100ep_clean_best.pt"
 st.divider()
 
-
-# ─────────────────────────────────────────────
-# Processing
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# MAIN PIPELINE
+# ─────────────────────────────────────────────────────────────
 if uploaded:
+    model  = load_yolo(model_path)
+    reader = load_ocr_reader()
 
-    # Load models
-    with st.spinner(f"Loading YOLO model: `{selected_model}`…"):
-        try:
-            model = load_yolo(selected_model)
-        except Exception as e:
-            st.error(f"Failed to load `{selected_model}`: {e}")
-            st.stop()
-
-    with st.spinner("Initialising OCR engines…"):
-        easyocr_reader = load_easyocr()
-
-    # Collect images
-    with tempfile.TemporaryDirectory() as tmp_dir:
-
+    with tempfile.TemporaryDirectory() as tmp:
         image_paths = []
 
-        if uploaded.name.lower().endswith(".zip"):
+        if uploaded.name.endswith(".zip"):
             with zipfile.ZipFile(uploaded, "r") as z:
-                z.extractall(tmp_dir)
-            valid_exts = (".jpg", ".jpeg", ".png")
-            for root, _, files in os.walk(tmp_dir):
-                for f in sorted(files):
-                    if f.lower().endswith(valid_exts) and not f.startswith("__"):
-                        image_paths.append(os.path.join(root, f))
+                z.extractall(tmp)
+            for f in sorted(os.listdir(tmp)):
+                if f.lower().endswith((".jpg",".jpeg",".png")):
+                    image_paths.append(os.path.join(tmp, f))
         else:
-            save_path = os.path.join(tmp_dir, uploaded.name)
-            with open(save_path, "wb") as f:
+            p = os.path.join(tmp, uploaded.name)
+            with open(p, "wb") as f:
                 f.write(uploaded.getbuffer())
-            image_paths = [save_path]
+            image_paths = [p]
 
-        if not image_paths:
-            st.error("No valid images found in the upload.")
-            st.stop()
-
-        # ── Metrics row ──────────────────────────
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.markdown(f"""<div class="metric-box">
-                <div class="metric-value">{len(image_paths)}</div>
-                <div class="metric-label">Images</div></div>""", unsafe_allow_html=True)
-        with c2:
-            st.markdown(f"""<div class="metric-box">
-                <div class="metric-value">{selected_model.replace('.pt','')[:12]}</div>
-                <div class="metric-label">Model</div></div>""", unsafe_allow_html=True)
-        with c3:
-            st.markdown(f"""<div class="metric-box">
-                <div class="metric-value">{conf_threshold:.0%}</div>
-                <div class="metric-label">Confidence</div></div>""", unsafe_allow_html=True)
-        with c4:
-            st.markdown(f"""<div class="metric-box">
-                <div class="metric-value">{ocr_mode.split()[0]}</div>
-                <div class="metric-label">OCR Mode</div></div>""", unsafe_allow_html=True)
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        results_db = []
+        st.session_state.results = []
         total_tags = 0
 
-        progress_bar = st.progress(0, text="Starting detection…")
+        for img_path in image_paths:
+            img_name  = os.path.basename(img_path)
+            image_pil = pil_from_path(img_path)
 
-        for img_idx, image_path in enumerate(image_paths, 1):
+            yolo_results = model(img_path, conf=det_conf)
+            boxes        = yolo_results[0].boxes
 
-            img_name = os.path.basename(image_path)
-            progress_bar.progress(
-                img_idx / len(image_paths),
-                text=f"Processing {img_name} ({img_idx}/{len(image_paths)})"
-            )
+            with st.expander(f"📷  {img_name}  —  {len(boxes)} tag(s) detected",
+                             expanded=True):
 
-            orig_img = cv2.imread(image_path)
-            if orig_img is None:
-                st.warning(f"⚠️ Could not read `{img_name}` — skipping.")
-                continue
+                col_img, col_tags = st.columns([3, 2])
 
-            # YOLO inference
-            yolo_results = model(image_path, conf=conf_threshold, iou=iou_threshold)
+                # Annotated full image — YOLO returns numpy RGB via .plot()
+                plotted_np = yolo_results[0].plot()          # BGR numpy
+                plotted_rgb = plotted_np[:, :, ::-1]         # flip to RGB
+                with col_img:
+                    st.image(plotted_rgb, use_container_width=True,
+                             caption="YOLO detections")
 
-            with st.expander(f"📷  {img_name}", expanded=True):
-
-                left_col, right_col = st.columns([3, 2])
-
-                with left_col:
-                    annotated = yolo_results[0].plot()
-                    annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-                    st.image(annotated_rgb, caption="YOLO Detection", use_container_width=True)
-
-                with right_col:
-                    boxes = yolo_results[0].boxes
-
-                    if boxes is None or len(boxes) == 0:
-                        st.warning("No ear tags detected. Try lowering the confidence threshold.")
+                with col_tags:
+                    if len(boxes) == 0:
+                        st.warning("No ear tags detected.")
                         continue
 
-                    st.markdown(f"**{len(boxes)} tag(s) detected**")
-
-                    for tag_idx, box in enumerate(boxes, 1):
-                        total_tags += 1
-                        conf = float(box.conf[0])
+                    for i, box in enumerate(boxes):
+                        det_confidence = float(box.conf[0])
                         x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-                        # Expand crop slightly for better OCR context
-                        pad = 6
-                        h_img, w_img = orig_img.shape[:2]
-                        x1p = max(0, x1 - pad)
-                        y1p = max(0, y1 - pad)
-                        x2p = min(w_img, x2 + pad)
-                        y2p = min(h_img, y2 + pad)
+                        crop_pil = crop_box(image_pil, x1, y1, x2, y2, pad=pad_px)
 
-                        crop = orig_img[y1p:y2p, x1p:x2p]
-                        if crop.size == 0:
-                            continue
+                        # OCR
+                        raw_text, ocr_confidence = ocr_crop(reader, crop_pil)
 
-                        crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                        if ocr_confidence < ocr_conf_thresh and raw_text != "UNREADABLE":
+                            raw_text = "LOW CONFIDENCE"
 
-                        # Show crop
-                        st.image(crop_rgb, width=200, caption=f"Tag #{tag_idx} crop")
+                        corrected, status, val_conf = validate_number(raw_text)
+                        total_tags += 1
 
-                        # Run OCR
-                        with st.spinner(f"Reading tag #{tag_idx}…"):
-                            ocr_text, engine = dual_ocr(easyocr_reader, crop, ocr_mode)
+                        # Display
+                        st.markdown(f"**Tag #{i+1}**")
+                        tc1, tc2 = st.columns(2)
+                        with tc1:
+                            st.image(crop_pil, caption="Crop",
+                                     use_container_width=True)
+                        with tc2:
+                            gray_pil = preprocess_grayscale(crop_pil)
+                            st.image(gray_pil, caption="Preprocessed",
+                                     use_container_width=True)
 
-                        # Display OCR result
-                        if ocr_text:
-                            engine_badge = f'<span class="ocr-engine-tag">{engine}</span>'
-                            st.markdown(
-                                f'<div class="ocr-result">🔢 {ocr_text} {engine_badge}</div>',
-                                unsafe_allow_html=True
-                            )
-                        else:
-                            st.markdown(
-                                '<div class="ocr-result ocr-fail">⚠️ OCR could not read tag</div>',
-                                unsafe_allow_html=True
-                            )
+                        display_num = corrected if corrected not in (
+                            "UNREADABLE", "LOW CONFIDENCE") else "???"
+                        st.markdown(
+                            f'<div class="tag-box">{display_num}</div>',
+                            unsafe_allow_html=True)
 
-                        # Editable field
-                        user_correction = st.text_input(
-                            f"✏️ Correct Tag #{tag_idx}",
-                            value=ocr_text,
-                            key=f"edit_{img_idx}_{tag_idx}",
-                            placeholder="Type correct ID if OCR is wrong"
-                        )
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("Raw OCR",   raw_text)
+                        m2.metric("Corrected", corrected)
+                        m3.metric("Status",    status)
 
-                        final_id = user_correction.strip() if user_correction.strip() else ocr_text
+                        st.progress(min(det_confidence, 1.0),
+                                    text=f"Detection conf: {det_confidence:.0%}")
+                        st.progress(min(ocr_confidence, 1.0),
+                                    text=f"OCR conf: {ocr_confidence:.0%}")
+                        st.divider()
 
-                        # Confidence bar
-                        st.progress(conf, text=f"Detection confidence: {conf:.1%}")
-                        st.markdown("---")
-
-                        results_db.append({
-                            "image": img_name,
-                            "tag_number": tag_idx,
-                            "ocr_raw": ocr_text,
-                            "ocr_engine": engine,
-                            "user_corrected": final_id,
-                            "detection_confidence": round(conf, 4),
-                            "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-                            "model_used": selected_model,
-                            "timestamp": datetime.now().isoformat()
+                        st.session_state.results.append({
+                            "Image":           img_name,
+                            "Tag_#":           i + 1,
+                            "Raw_OCR":         raw_text,
+                            "Tag_Number":      corrected,
+                            "Status":          status,
+                            "OCR_Confidence":  f"{ocr_confidence:.2f}",
+                            "Detection_Conf":  f"{det_confidence:.2f}",
+                            "Validation_Conf": f"{val_conf:.2f}",
+                            "BBox":            f"({x1},{y1})-({x2},{y2})",
+                            "Timestamp":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         })
 
-        progress_bar.empty()
-
-        # ── Summary bar ──────────────────────────────
-        if total_tags > 0:
-            readable = sum(1 for r in results_db if r["ocr_raw"])
-            st.success(f"✅ Scan complete — {total_tags} tag(s) found across {len(image_paths)} image(s). "
-                       f"OCR read {readable}/{total_tags} successfully.")
-
-        # ─────────────────────────────────────────────
-        # Download Results
-        # ─────────────────────────────────────────────
-        if results_db:
+        if st.session_state.results:
             st.divider()
-            st.markdown("### 💾 Download Results")
+            st.subheader(f"📊  Results — {total_tags} tag(s) processed")
+            df = pd.DataFrame(st.session_state.results)
+            st.dataframe(df, use_container_width=True)
 
-            dl1, dl2 = st.columns(2)
+            readable = df[df["Tag_Number"].str.match(r"^\d+$", na=False)]
+            s1, s2, s3, s4 = st.columns(4)
+            s1.metric("Total Tags",  len(df))
+            s2.metric("Readable",    len(readable))
+            s3.metric("Unreadable",  len(df) - len(readable))
+            s4.metric("Avg OCR Conf",
+                      f"{df['OCR_Confidence'].astype(float).mean():.0%}")
 
-            with dl1:
-                json_bytes = json.dumps(results_db, indent=2).encode("utf-8")
-                st.download_button(
-                    label="⬇️ Download JSON",
-                    data=json_bytes,
-                    file_name=f"eartag_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                    mime="application/json"
-                )
-
-            with dl2:
-                csv_lines = ["Image,Tag#,OCR_Text,Engine,Final_ID,Confidence,Model,Timestamp"]
-                for r in results_db:
-                    csv_lines.append(
-                        f'"{r["image"]}",'
-                        f'{r["tag_number"]},'
-                        f'"{r["ocr_raw"]}",'
-                        f'{r["ocr_engine"]},'
-                        f'"{r["user_corrected"]}",'
-                        f'{r["detection_confidence"]:.4f},'
-                        f'"{r["model_used"]}",'
-                        f'{r["timestamp"]}'
-                    )
-                csv_bytes = "\n".join(csv_lines).encode("utf-8")
-                st.download_button(
-                    label="⬇️ Download CSV",
-                    data=csv_bytes,
-                    file_name=f"eartag_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv"
-                )
-
-            # Preview table
-            with st.expander("📊 Results Preview"):
-                preview = [
-                    {
-                        "Image": r["image"],
-                        "Tag": r["tag_number"],
-                        "Detected ID": r["ocr_raw"] or "—",
-                        "Engine": r["ocr_engine"],
-                        "Final ID": r["user_corrected"] or "—",
-                        "Confidence": f"{r['detection_confidence']:.1%}",
-                    }
-                    for r in results_db
-                ]
-                st.table(preview)
+            st.download_button("⬇️  Download CSV",
+                               df.to_csv(index=False),
+                               file_name="ear_tag_results.csv",
+                               mime="text/csv",
+                               use_container_width=True)
 
 else:
-    # Landing state
-    st.markdown("""
-    <div style='text-align:center; padding:3rem; color:#555; border: 1px dashed #2d6a4f; border-radius:12px; background:#0d1a12;'>
-        <div style='font-size:3rem; margin-bottom:1rem;'>🐄</div>
-        <div style='font-size:1.1rem; color:#95d5b2; font-family: IBM Plex Mono, monospace;'>
-            Upload a ZIP archive or single image to begin
-        </div>
-        <div style='font-size:0.85rem; color:#555; margin-top:0.5rem;'>
-            Supports JPG · JPEG · PNG · ZIP
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.info("⬆️  Upload one image or a ZIP of cattle images to begin.")
+
+    st.markdown("---")
+    st.markdown("#### 🧪  Test OCR pipeline (no YOLO needed)")
+    test_upload = st.file_uploader("Drop an ear-tag crop here",
+                                   type=["jpg","jpeg","png"],
+                                   key="test_ocr")
+    if test_upload:
+        reader   = load_ocr_reader()
+        crop_pil = pil_from_bytes(test_upload.read())
+
+        gray_pil           = preprocess_grayscale(crop_pil)
+        raw_text, conf     = ocr_crop(reader, crop_pil)
+        corrected, status, val_conf = validate_number(raw_text)
+
+        tc1, tc2, tc3 = st.columns(3)
+        with tc1:
+            st.image(crop_pil, caption="Original", use_container_width=True)
+        with tc2:
+            st.image(gray_pil, caption="Preprocessed", use_container_width=True)
+        with tc3:
+            st.markdown(
+                f'<div class="tag-box">{corrected or "???"}</div>',
+                unsafe_allow_html=True)
+            st.metric("Raw OCR",   raw_text)
+            st.metric("Corrected", corrected)
+            st.metric("Status",    status)
+            st.progress(conf, text=f"OCR confidence: {conf:.0%}")
