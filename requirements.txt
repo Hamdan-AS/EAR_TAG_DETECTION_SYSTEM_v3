@@ -4,6 +4,6 @@ easyocr
 opencv-python-headless
 ultralytics
 pillow
-numpy
+numpy<2.0  # Or specifically numpy==1.26.4 for stability
 torch==2.2.2
 torchvision==0.17.2
