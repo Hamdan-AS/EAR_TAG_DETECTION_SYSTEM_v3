@@ -14,8 +14,8 @@ from datetime import datetime
 # 1. SETUP
 # ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Cow Tag Scanner", layout="wide")
-st.title("🐄 Cow Ear Tag Detector")
-st.write("Detect ear tags and read ID numbers using YOLOv8 & EasyOCR. Upload a single image **or a ZIP** of images.")
+st.title("Cow Ear Tag Detector")
+st.write("Detect ear tags and read ID numbers using YOLOv8 & EasyOCR. Upload a single image or a ZIP of images.")
 
 MISHAP_MAP = {
     "|": "1", "I": "1", "l": "1", "[": "1", "]": "1", "(": "1", ")": "1",
@@ -33,9 +33,11 @@ detector, ocr_reader = load_models()
 # ─────────────────────────────────────────────────────────────
 # 2. SIDEBAR SETTINGS
 # ─────────────────────────────────────────────────────────────
-st.sidebar.header("⚙️ Settings")
+st.sidebar.header("Settings")
 conf_level = st.sidebar.slider("Detection Confidence", 0.1, 1.0, 0.4)
 padding    = st.sidebar.number_input("Crop Padding (px)", 0, 100, 20)
+use_largest_bbox = st.sidebar.checkbox("Use Largest Bounding Box Only", value=False)
+use_largest_pixels = st.sidebar.checkbox("Use Largest Text Pixels Only", value=False)
 
 # ─────────────────────────────────────────────────────────────
 # 3. HELPERS
@@ -47,26 +49,68 @@ def _bbox_height(bbox) -> float:
     return max(ys) - min(ys)
 
 
-def pick_dominant_number(ocr_results: list) -> tuple[str, str]:
+def _bbox_width(bbox) -> float:
+    """Return pixel width of an EasyOCR bounding box [[x,y],...]."""
+    xs = [pt[0] for pt in bbox]
+    return max(xs) - min(xs)
+
+
+def _bbox_area(bbox) -> float:
+    """Return pixel area of an EasyOCR bounding box."""
+    return _bbox_width(bbox) * _bbox_height(bbox)
+
+
+def get_largest_bbox(boxes) -> tuple:
     """
-    Discard small handwritten annotations; keep only the tallest
-    (= largest printed) text regions, merged left-to-right.
+    Filter YOLO boxes to keep only the largest bounding box by pixel area.
+    Returns (x1, y1, x2, y2) or None if no boxes.
+    """
+    if not boxes or len(boxes) == 0:
+        return None
+    
+    largest_box = None
+    largest_area = 0
+    
+    for box in boxes:
+        x1, y1, x2, y2 = map(int, box.xyxy[0])
+        area = (x2 - x1) * (y2 - y1)
+        
+        if area > largest_area:
+            largest_area = area
+            largest_box = (x1, y1, x2, y2)
+    
+    return largest_box
+
+
+def pick_dominant_number(ocr_results: list, use_largest_pixels: bool = False) -> tuple[str, str]:
+    """
+    If use_largest_pixels: keep only the text block with largest pixel area.
+    Otherwise: discard small handwritten annotations; keep tallest (largest printed) 
+    text regions, merged left-to-right.
     Returns (raw_merged_text, digits_only).
     """
     if not ocr_results:
         return "", ""
 
-    heights   = [_bbox_height(r[0]) for r in ocr_results]
-    max_h     = max(heights)
-    threshold = max_h * 0.60        # ignore anything < 60 % of tallest
+    if use_largest_pixels:
+        # Keep only the largest text block by pixel area
+        areas = [_bbox_area(r[0]) for r in ocr_results]
+        max_area = max(areas)
+        idx = areas.index(max_area)
+        raw_text = ocr_results[idx][1].strip()
+    else:
+        # Original logic: keep largest printed text (by height threshold)
+        heights   = [_bbox_height(r[0]) for r in ocr_results]
+        max_h     = max(heights)
+        threshold = max_h * 0.60        # ignore anything < 60% of tallest
 
-    dominant = [
-        r for r, h in zip(ocr_results, heights) if h >= threshold
-    ]
-    # sort left-to-right by x-centre of bbox
-    dominant.sort(key=lambda r: np.mean([pt[0] for pt in r[0]]))
+        dominant = [
+            r for r, h in zip(ocr_results, heights) if h >= threshold
+        ]
+        # sort left-to-right by x-centre of bbox
+        dominant.sort(key=lambda r: np.mean([pt[0] for pt in r[0]]))
 
-    raw_text = "".join(r[1] for r in dominant).strip()
+        raw_text = "".join(r[1] for r in dominant).strip()
 
     # apply mishap fixes → digits only
     final_id = ""
@@ -131,9 +175,13 @@ def load_images_from_upload(uploaded) -> list[tuple[str, Image.Image]]:
 def process_image(img_name: str,
                   img: Image.Image,
                   conf: float,
-                  pad: int) -> tuple[np.ndarray, list[dict]]:
+                  pad: int,
+                  use_largest_bbox: bool = False,
+                  use_largest_pixels: bool = False) -> tuple[np.ndarray, list[dict]]:
     """
     Run YOLO + OCR on one PIL image.
+    If use_largest_bbox: only process the largest detection.
+    If use_largest_pixels: only extract largest text block by pixel area.
     Returns (annotated_rgb_array, list_of_result_dicts).
     """
     results   = detector(img, conf=conf)[0]
@@ -141,27 +189,58 @@ def process_image(img_name: str,
     boxes     = results.boxes
     records   = []
 
-    for i, box in enumerate(boxes):
-        x1, y1, x2, y2    = map(int, box.xyxy[0])
-        det_conf           = float(box.conf[0])
-        tag_crop           = safe_crop(img, x1, y1, x2, y2, pad)
-        clean_crop         = preprocess_crop(tag_crop)
-        crop_np            = np.array(clean_crop)
-        ocr_out            = ocr_reader.readtext(crop_np)
-        raw_text, final_id = pick_dominant_number(ocr_out)
+    # Filter to largest bbox if requested
+    if use_largest_bbox:
+        largest = get_largest_bbox(boxes)
+        if largest is None:
+            return annotated, records
+        
+        x1, y1, x2, y2 = largest
+        # Find the box object that matches
+        for i, box in enumerate(boxes):
+            box_x1, box_y1, box_x2, box_y2 = map(int, box.xyxy[0])
+            if (box_x1, box_y1, box_x2, box_y2) == (x1, y1, x2, y2):
+                det_conf = float(box.conf[0])
+                tag_crop = safe_crop(img, x1, y1, x2, y2, pad)
+                clean_crop = preprocess_crop(tag_crop)
+                crop_np = np.array(clean_crop)
+                ocr_out = ocr_reader.readtext(crop_np)
+                raw_text, final_id = pick_dominant_number(ocr_out, use_largest_pixels)
 
-        records.append({
-            "Image":          img_name,
-            "Tag_#":          i + 1,
-            "Tag_Number":     final_id  if final_id  else "UNREADABLE",
-            "Raw_OCR":        raw_text  if raw_text  else "",
-            "Detection_Conf": f"{det_conf:.2f}",
-            "BBox":           f"({x1},{y1})-({x2},{y2})",
-            "Timestamp":      datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            # keep PIL crops for display (not in final CSV)
-            "_tag_crop":      tag_crop,
-            "_clean_crop":    clean_crop,
-        })
+                records.append({
+                    "Image":          img_name,
+                    "Tag_#":          1,
+                    "Tag_Number":     final_id  if final_id  else "UNREADABLE",
+                    "Raw_OCR":        raw_text  if raw_text  else "",
+                    "Detection_Conf": f"{det_conf:.2f}",
+                    "BBox":           f"({x1},{y1})-({x2},{y2})",
+                    "Timestamp":      datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "_tag_crop":      tag_crop,
+                    "_clean_crop":    clean_crop,
+                })
+                break
+    else:
+        # Process all detections
+        for i, box in enumerate(boxes):
+            x1, y1, x2, y2    = map(int, box.xyxy[0])
+            det_conf           = float(box.conf[0])
+            tag_crop           = safe_crop(img, x1, y1, x2, y2, pad)
+            clean_crop         = preprocess_crop(tag_crop)
+            crop_np            = np.array(clean_crop)
+            ocr_out            = ocr_reader.readtext(crop_np)
+            raw_text, final_id = pick_dominant_number(ocr_out, use_largest_pixels)
+
+            records.append({
+                "Image":          img_name,
+                "Tag_#":          i + 1,
+                "Tag_Number":     final_id  if final_id  else "UNREADABLE",
+                "Raw_OCR":        raw_text  if raw_text  else "",
+                "Detection_Conf": f"{det_conf:.2f}",
+                "BBox":           f"({x1},{y1})-({x2},{y2})",
+                "Timestamp":      datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "_tag_crop":      tag_crop,
+                "_clean_crop":    clean_crop,
+            })
 
     return annotated, records
 
@@ -170,7 +249,7 @@ def process_image(img_name: str,
 # 4. FILE UPLOADER  (image OR zip)
 # ─────────────────────────────────────────────────────────────
 uploaded_file = st.file_uploader(
-    "Choose a cattle image or ZIP of images…",
+    "Choose a cattle image or ZIP of images...",
     type=["zip","jpg", "jpeg", "png"],
 )
 
@@ -185,16 +264,23 @@ if uploaded_file:
         st.error("No valid images found in the uploaded file.")
         st.stop()
 
-    st.info(f"Processing **{len(all_images)}** image(s) …")
+    st.info(f"Processing **{len(all_images)}** image(s) ...")
 
     all_records = []   # accumulate across all images for CSV
 
     for img_name, img in all_images:
 
-        annotated, records = process_image(img_name, img, conf_level, padding)
+        annotated, records = process_image(
+            img_name, 
+            img, 
+            conf_level, 
+            padding,
+            use_largest_bbox=use_largest_bbox,
+            use_largest_pixels=use_largest_pixels
+        )
         all_records.extend(records)
 
-        with st.expander(f"📷  {img_name}  —  {len(records)} tag(s)", expanded=True):
+        with st.expander(f"Image: {img_name} — {len(records)} tag(s)", expanded=True):
 
             st.image(annotated, caption="YOLO detections",
                      use_container_width=True)
@@ -228,7 +314,7 @@ if uploaded_file:
                     else:
                         st.warning("Could not read numbers clearly.")
 
-                    st.text(f"Raw OCR : {rec['Raw_OCR']}")
+                    st.text(f"Raw OCR: {rec['Raw_OCR']}")
                     st.text(f"Det conf: {rec['Detection_Conf']}")
 
                 st.divider()
@@ -238,7 +324,7 @@ if uploaded_file:
     # ─────────────────────────────────────────────────────────
     if all_records:
         st.divider()
-        st.subheader("📊 All Results")
+        st.subheader("All Results")
 
         # Drop internal PIL columns before showing / exporting
         export_cols = ["Image","Tag_#","Tag_Number","Raw_OCR",
@@ -253,7 +339,7 @@ if uploaded_file:
         m3.metric("Unreadable",  len(df) - len(readable))
 
         st.download_button(
-            "⬇️  Download CSV",
+            "Download CSV",
             df.to_csv(index=False),
             file_name="ear_tag_results.csv",
             mime="text/csv",
