@@ -1,6 +1,8 @@
 streamlit
-ultralytics
+pandas
+easyocr
 opencv-python-headless
+ultralytics
 pillow
 numpy
 torch
