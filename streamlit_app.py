@@ -24,7 +24,7 @@ MISHAP_MAP = {
 
 @st.cache_resource
 def load_models():
-    model  = YOLO("cow_eartag_yolov8n_100ep_clean_best.pt")
+    model  = YOLO("cow_eartag_yolov8n_100ep_clean_cow_eartag_yolov8n_100ep_clean_best.pt")
     reader = easyocr.Reader(['en'], gpu=False)
     return model, reader
 
